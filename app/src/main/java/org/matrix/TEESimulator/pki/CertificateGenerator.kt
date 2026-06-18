@@ -8,9 +8,6 @@ import java.math.BigInteger
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.cert.Certificate
-import java.security.cert.X509Certificate
-import java.security.interfaces.ECKey
-import java.security.interfaces.RSAKey
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.RSAKeyGenParameterSpec
 import java.util.Date
@@ -30,24 +27,11 @@ import org.matrix.TEESimulator.interception.keystore.KeyIdentifier
 import org.matrix.TEESimulator.interception.keystore.shim.KeyMintSecurityLevelInterceptor
 import org.matrix.TEESimulator.logging.SystemLogger
 
-/**
- * Responsible for generating new cryptographic key pairs and X.509 certificate chains.
- *
- * This object simulates the behavior of the Android KeyMint/Keymaster HAL by creating certificates
- * that include a fully-featured, simulated attestation extension.
- */
 object CertificateGenerator {
 
-    // AOSP utils.rs: pub const UNDEFINED_NOT_AFTER: i64 = 253402300799000i64;
-    // RFC 5280 GeneralizedTime maximum: 9999-12-31T23:59:59 UTC (millis since epoch)
+    /** RFC 5280 GeneralizedTime max: 9999-12-31 23:59:59 UTC */
     private const val UNDEFINED_NOT_AFTER = 253402300799000L
 
-    /**
-     * Generates a software-based cryptographic key pair.
-     *
-     * @param params The parameters specifying the key's algorithm, size, and other properties.
-     * @return A new [KeyPair], or `null` on failure.
-     */
     fun generateSoftwareKeyPair(params: KeyMintAttestation): KeyPair? {
         return runCatching {
                 val (algorithm, spec) =
@@ -64,7 +48,6 @@ object CertificateGenerator {
                                 "Unsupported algorithm: ${params.algorithm}"
                             )
                     }
-                SystemLogger.debug("Generating $algorithm key pair with size ${params.keySize}")
                 KeyPairGenerator.getInstance(algorithm, BouncyCastleProvider.PROVIDER_NAME)
                     .apply { initialize(spec) }
                     .generateKeyPair()
@@ -74,15 +57,15 @@ object CertificateGenerator {
     }
 
     /**
-     * Generates a certificate chain for a given key pair. This is the primary function for creating
-     * attested certificates.
+     * Generates a certificate chain for a given key pair.
      *
-     * @param uid The UID of the application requesting the key.
-     * @param subjectKeyPair The key pair for which the certificate will be generated.
-     * @param attestKeyAlias Optional alias of a key to use for attestation signing.
-     * @param params The parameters for the new key and its attestation.
-     * @param securityLevel The security level to embed in the attestation.
-     * @return A [List] of [Certificate] forming the new chain, or `null` on failure.
+     * AOSP ta/src/keys.rs:451-478: when no attestation challenge and no attestKey are
+     * provided, returns a self-signed leaf certificate (depth 1) with no attestation
+     * extension. This matches real KeyMint HAL behavior.
+     *
+     * When BYO attest key lookup misses, include the full keybox certificate chain
+     * so the chain is rooted (not just a depth-1 chain signed by keybox root with no
+     * parent attached — which would be structurally invalid).
      */
     fun generateCertificateChain(
         uid: Int,
@@ -97,39 +80,41 @@ object CertificateGenerator {
                 "Attestation challenge exceeds length limit (${challenge.size} > ${AttestationConstants.CHALLENGE_LENGTH_LIMIT})"
             )
 
-        return runCatching {
+        return try {
+                // AOSP: no challenge + no attestKey = self-signed, depth 1
+                if (challenge == null && attestKeyAlias == null) {
+                    return listOf(buildSelfSignedCertificate(subjectKeyPair, params))
+                }
+
                 val keybox = getKeyboxForAlgorithm(uid, params.algorithm)
 
-                // Determine the signing key and issuer. If an attestKey is provided, use it.
-                // Otherwise, fall back to the root key from the keybox.
-                val (signingKey, issuer) =
+                val attestKeyInfo =
                     if (attestKeyAlias != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                        getAttestationKeyInfo(uid, attestKeyAlias)?.let { it.first to it.second }
-                            ?: (keybox.keyPair to getIssuerFromKeybox(keybox))
-                    } else {
-                        keybox.keyPair to getIssuerFromKeybox(keybox)
-                    }
+                        getAttestationKeyInfo(uid, attestKeyAlias)
+                    } else null
 
-                // Build the new leaf certificate with the simulated attestation.
+                val (signingKey, issuer) = attestKeyInfo
+                    ?.let { it.first to it.second }
+                    ?: (keybox.keyPair to getIssuerFromKeybox(keybox))
+
                 val leafCert =
                     buildCertificate(subjectKeyPair, signingKey, issuer, params, uid, securityLevel)
 
-                // If not self-attesting, the chain is just the leaf. Otherwise, append the keybox
-                // chain.
-                if (attestKeyAlias != null) {
+                if (attestKeyInfo != null) {
+                    // BYO hit: caller holds the rest of the chain
                     listOf(leafCert)
                 } else {
+                    // BYO miss: include keybox.certificates so chain is rooted
                     listOf(leafCert) + keybox.certificates
                 }
+            } catch (e: android.os.ServiceSpecificException) {
+                throw e
+            } catch (e: Exception) {
+                SystemLogger.error("Failed to generate certificate chain.", e)
+                null
             }
-            .onFailure { SystemLogger.error("Failed to generate certificate chain.", it) }
-            .getOrNull()
     }
 
-    /**
-     * A convenience function that combines key pair generation and certificate chain generation.
-     * Primarily used by the modern Keystore2 interceptor where generation is a single step.
-     */
     fun generateAttestedKeyPair(
         uid: Int,
         alias: String,
@@ -137,27 +122,20 @@ object CertificateGenerator {
         params: KeyMintAttestation,
         securityLevel: Int,
     ): Pair<KeyPair, List<Certificate>>? {
-        return runCatching {
-                SystemLogger.info(
-                    "Generating new attested key pair for alias: '$alias' (UID: $uid)"
-                )
+        return try {
                 val newKeyPair =
                     generateSoftwareKeyPair(params)
                         ?: throw Exception("Failed to generate underlying software key pair.")
-
                 val chain =
                     generateCertificateChain(uid, newKeyPair, attestKeyAlias, params, securityLevel)
                         ?: throw Exception("Failed to generate certificate chain for new key pair.")
-
-                SystemLogger.info(
-                    "Successfully generated new certificate chain for alias: '$alias'."
-                )
                 Pair(newKeyPair, chain)
+            } catch (e: android.os.ServiceSpecificException) {
+                throw e
+            } catch (e: Exception) {
+                SystemLogger.error("Failed to generate attested key pair for alias '$alias'.", e)
+                null
             }
-            .onFailure {
-                SystemLogger.error("Failed to generate attested key pair for alias '$alias'.", it)
-            }
-            .getOrNull()
     }
 
     fun getIssuerFromKeybox(keybox: KeyBox) =
@@ -172,14 +150,14 @@ object CertificateGenerator {
                 else -> throw IllegalArgumentException("Unsupported algorithm ID: $algorithm")
             }
         return KeyBoxManager.getAttestationKey(keyboxFile, algorithmName)
-            ?: throw Exception("Could not load keybox for UID $uid and algorithm $algorithmName")
+            ?: throw android.os.ServiceSpecificException(
+                -75,
+                "No attestation key for algorithm $algorithmName in $keyboxFile",
+            )
     }
 
-    /** Retrieves the key pair and issuer name for a given attestation key alias. */
     private fun getAttestationKeyInfo(uid: Int, attestKeyAlias: String): Pair<KeyPair, X500Name>? {
-        SystemLogger.debug("Looking for attestation key: uid=$uid alias=$attestKeyAlias")
         val keyId = KeyIdentifier(uid, attestKeyAlias)
-        // Access the public map of generated keys
         val keyInfo = KeyMintSecurityLevelInterceptor.generatedKeys[keyId]
         return if (keyInfo != null) {
             val certChain = CertificateHelper.getCertificateChain(keyInfo.response)
@@ -190,9 +168,6 @@ object CertificateGenerator {
                 null
             }
         } else {
-            SystemLogger.warning(
-                "Attestation key '$attestKeyAlias' not found in generated key cache."
-            )
             null
         }
     }
@@ -201,21 +176,18 @@ object CertificateGenerator {
     private fun buildKeyUsageFromPurposes(purposes: List<Int>): Int {
         var bits = 0
         for (purpose in purposes) {
-            bits =
-                bits or
-                    when (purpose) {
-                        KeyPurpose.SIGN -> KeyUsage.digitalSignature
-                        KeyPurpose.DECRYPT -> KeyUsage.dataEncipherment
-                        KeyPurpose.WRAP_KEY -> KeyUsage.keyEncipherment
-                        KeyPurpose.AGREE_KEY -> KeyUsage.keyAgreement
-                        KeyPurpose.ATTEST_KEY -> KeyUsage.keyCertSign
-                        else -> 0
-                    }
+            bits = bits or when (purpose) {
+                KeyPurpose.SIGN -> KeyUsage.digitalSignature
+                KeyPurpose.DECRYPT -> KeyUsage.dataEncipherment
+                KeyPurpose.WRAP_KEY -> KeyUsage.keyEncipherment
+                KeyPurpose.AGREE_KEY -> KeyUsage.keyAgreement
+                KeyPurpose.ATTEST_KEY -> KeyUsage.keyCertSign
+                else -> 0
+            }
         }
         return bits
     }
 
-    /** Constructs a new X.509 certificate with a simulated attestation extension. */
     private fun buildCertificate(
         subjectKeyPair: KeyPair,
         signingKeyPair: KeyPair,
@@ -225,10 +197,6 @@ object CertificateGenerator {
         securityLevel: Int,
     ): Certificate {
         val subject = params.certificateSubject ?: X500Name("CN=Android Keystore Key")
-
-        // AOSP add_required_parameters (security_level.rs) defaults:
-        //   CERTIFICATE_NOT_BEFORE = 0 (Unix epoch)
-        //   CERTIFICATE_NOT_AFTER  = 253402300799000 (9999-12-31T23:59:59 UTC)
         val notBefore = params.certificateNotBefore ?: Date(0)
         val notAfter = params.certificateNotAfter ?: Date(UNDEFINED_NOT_AFTER)
 
@@ -242,29 +210,66 @@ object CertificateGenerator {
                 subjectKeyPair.public,
             )
 
-        // Add KeyUsage extension only if purposes map to valid bits
         val keyUsageBits = buildKeyUsageFromPurposes(params.purpose)
         if (keyUsageBits != 0) {
             builder.addExtension(Extension.keyUsage, true, KeyUsage(keyUsageBits))
         }
-        // Add our custom, simulated attestation extension.
-        builder.addExtension(
-            AttestationBuilder.buildAttestationExtension(params, uid, securityLevel)
-        )
+        if (params.attestationChallenge != null) {
+            builder.addExtension(
+                AttestationBuilder.buildAttestationExtension(params, uid, securityLevel)
+            )
+        }
 
+        // Signing algorithm must match the signing key's type, not the subject key's.
         val signerAlgorithm =
-            when (signingKeyPair.private) {
-                is ECKey -> "SHA256withECDSA"
-                is RSAKey -> "SHA256withRSA"
-                else ->
-                    throw IllegalArgumentException(
-                        "Unsupported signing key type: ${signingKeyPair.private.javaClass}"
-                    )
+            when (signingKeyPair.private.algorithm) {
+                "EC", "ECDSA" -> "SHA256withECDSA"
+                "RSA" -> "SHA256withRSA"
+                else -> throw IllegalArgumentException("Unsupported signing key: ${signingKeyPair.private.algorithm}")
             }
         val contentSigner =
             JcaContentSignerBuilder(signerAlgorithm)
                 .setProvider(BouncyCastleProvider.PROVIDER_NAME)
                 .build(signingKeyPair.private)
+
+        return JcaX509CertificateConverter().getCertificate(builder.build(contentSigner))
+    }
+
+    /**
+     * AOSP ta/src/keys.rs:452-478, ta/src/cert.rs:111-114:
+     * Self-signed leaf (depth 1) for non-attested keys. subject==issuer,
+     * signed by the generated key itself, no attestation extension.
+     */
+    private fun buildSelfSignedCertificate(
+        keyPair: KeyPair,
+        params: KeyMintAttestation,
+    ): Certificate {
+        val subject = params.certificateSubject ?: X500Name("CN=Android Keystore Key")
+        val notBefore = params.certificateNotBefore ?: Date(0)
+        val notAfter = params.certificateNotAfter ?: Date(UNDEFINED_NOT_AFTER)
+
+        val builder = JcaX509v3CertificateBuilder(
+            subject,
+            params.certificateSerial ?: BigInteger.ONE,
+            notBefore,
+            notAfter,
+            subject,
+            keyPair.public,
+        )
+
+        val keyUsageBits = buildKeyUsageFromPurposes(params.purpose)
+        if (keyUsageBits != 0) {
+            builder.addExtension(Extension.keyUsage, true, KeyUsage(keyUsageBits))
+        }
+
+        val signerAlgorithm = when (keyPair.private.algorithm) {
+            "EC", "ECDSA" -> "SHA256withECDSA"
+            "RSA" -> "SHA256withRSA"
+            else -> throw IllegalArgumentException("Unsupported key: ${keyPair.private.algorithm}")
+        }
+        val contentSigner = JcaContentSignerBuilder(signerAlgorithm)
+            .setProvider(BouncyCastleProvider.PROVIDER_NAME)
+            .build(keyPair.private)
 
         return JcaX509CertificateConverter().getCertificate(builder.build(contentSigner))
     }
