@@ -1,15 +1,6 @@
 package org.matrix.TEESimulator.attestation
 
-/**
- * Defines constants for KeyMint attestation, mainly the tags of properties and authorizations of a
- * cryptographic key, as specified in the Android hardware security HAL.
- */
 object AttestationConstants {
-    // https://cs.android.com/android/platform/superproject/main/+/main:hardware/interfaces/security/keymint/aidl/android/hardware/security/keymint/KeyCreationResult.aidl
-
-    // These constants represent the fixed positions of fields within the top-level
-    // KeyDescription ASN.1 SEQUENCE in a key attestation. Using these constants
-    // prevents hardcoding fragile index numbers throughout the parsing code.
     const val KEY_DESCRIPTION_ATTESTATION_VERSION_INDEX = 0
     const val KEY_DESCRIPTION_ATTESTATION_SECURITY_LEVEL_INDEX = 1
     const val KEY_DESCRIPTION_KEYMINT_VERSION_INDEX = 2
@@ -19,15 +10,10 @@ object AttestationConstants {
     const val KEY_DESCRIPTION_SOFTWARE_ENFORCED_INDEX = 6
     const val KEY_DESCRIPTION_TEE_ENFORCED_INDEX = 7
 
-    // --- RootOfTrust Sequence Indices ---
-    // These constants represent the fixed positions of fields within the
-    // RootOfTrust ASN.1 SEQUENCE.
     const val ROOT_OF_TRUST_VERIFIED_BOOT_KEY_INDEX = 0
     const val ROOT_OF_TRUST_DEVICE_LOCKED_INDEX = 1
     const val ROOT_OF_TRUST_VERIFIED_BOOT_STATE_INDEX = 2
     const val ROOT_OF_TRUST_VERIFIED_BOOT_HASH_INDEX = 3
-
-    // https://cs.android.com/android/platform/superproject/main/+/main:hardware/interfaces/security/keymint/aidl/android/hardware/security/keymint/Tag.aidl
 
     // --- Key Properties ---
     const val TAG_PURPOSE = 1
@@ -44,9 +30,11 @@ object AttestationConstants {
 
     // --- Key Lifetime and Usage Control ---
     const val TAG_ROLLBACK_RESISTANCE = 303
+    const val TAG_EARLY_BOOT_ONLY = 305
     const val TAG_ACTIVE_DATETIME = 400
     const val TAG_ORIGINATION_EXPIRE_DATETIME = 401
     const val TAG_USAGE_EXPIRE_DATETIME = 402
+    const val TAG_MAX_BOOT_LEVEL = 403
     const val TAG_MAX_USES_PER_BOOT = 404
     const val TAG_USAGE_COUNT_LIMIT = 405
 
@@ -56,6 +44,10 @@ object AttestationConstants {
     const val TAG_NO_AUTH_REQUIRED = 503
     const val TAG_USER_AUTH_TYPE = 504
     const val TAG_AUTH_TIMEOUT = 505
+    const val TAG_ALLOW_WHILE_ON_BODY = 506
+    const val TAG_TRUSTED_USER_PRESENCE_REQUIRED = 507
+    const val TAG_TRUSTED_CONFIRMATION_REQUIRED = 508
+    const val TAG_UNLOCKED_DEVICE_REQUIRED = 509
 
     // --- Attestation and Application Info ---
     const val TAG_APPLICATION_ID = 601
@@ -88,6 +80,5 @@ object AttestationConstants {
     const val TAG_CERTIFICATE_NOT_AFTER = 1009
 
     // --- Other Constants ---
-    // https://cs.android.com/android/platform/superproject/main/+/main:system/keymaster/km_openssl/attestation_record.cpp
-    const val CHALLENGE_LENGTH_LIMIT = 128 // kMaximumAttestationChallengeLength
+    const val CHALLENGE_LENGTH_LIMIT = 128
 }
