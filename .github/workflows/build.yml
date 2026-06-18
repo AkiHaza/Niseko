@@ -2,10 +2,10 @@ name: Build
 
 on:
   push:
-    branches: ["main"]
-    paths-ignore: ['**.md']
+    branches: ["dev"]
+    paths-ignore: ['**.md', 'module/update.json']
   pull_request:
-    branches: ["main", "dev"]
+    branches: ["dev", "main"]
     paths-ignore: ['**.md']
   workflow_dispatch:
 
@@ -81,7 +81,7 @@ jobs:
 
   release:
     needs: build
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -134,7 +134,7 @@ jobs:
           git add module/update.json
           git diff --cached --quiet || {
             git commit -m "chore(release): bump update.json to $VER [skip ci]"
-            git push origin HEAD:main
+            git push
           }
         env:
           VER: ${{ steps.ver.outputs.version }}
