@@ -15,7 +15,7 @@ fi
 
 # --- Version Info ---
 VERSION=$(grep_prop version "${TMPDIR}/module.prop")
-ui_print "- Installing TEESimulator $VERSION"
+ui_print "- Installing Niseko $VERSION"
 ui_print ""
 
 # --- Architecture Handling ---
@@ -48,7 +48,7 @@ install_file() {
 
 # --- Installation ---
 ui_print "- Extracting module files"
-for file in customize.sh module.prop service.sh sepolicy.rule daemon; do
+for file in customize.sh module.prop service.sh sepolicy.rule daemon action.sh action_i18n.sh uninstall.sh; do
   install_file "$file" "$MODPATH"
 done
 
@@ -86,4 +86,24 @@ fi
 if [ ! -f "$CONFIG_DIR/target.txt" ]; then
   ui_print "- Adding default target scope"
   install_file "target.txt" "$CONFIG_DIR"
+fi
+
+if [ ! -f "$CONFIG_DIR/security_patch.txt" ]; then
+  ui_print "- Adding default security patch config (mirror device props)"
+  printf '%s\n' \
+    '# Niseko default: mirror live device props.' \
+    '# system=prop reads ro.build.version.security_patch at cert-gen time;' \
+    '# boot and vendor are auto-forced to prop too.' \
+    '# Override with explicit YYYY-MM-DD dates if you want active spoofing.' \
+    'system=prop' > "$CONFIG_DIR/security_patch.txt"
+  chmod 644 "$CONFIG_DIR/security_patch.txt"
+fi
+
+# Generate device-unique hardware-bound key seed for unique_id computation.
+# Without this, includeUniqueId attestation uses an ephemeral key that changes
+# on every reboot, causing unique_id to differ across sessions.
+if [ ! -f "$CONFIG_DIR/hbk" ]; then
+  ui_print "- Generating device-unique hardware-bound key seed"
+  head -c 32 /dev/random > "$CONFIG_DIR/hbk"
+  chmod 644 "$CONFIG_DIR/hbk"
 fi

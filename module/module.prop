@@ -1,7 +1,7 @@
 id=tricky_store
-name=TEESimulator
+name=Niseko
 version=${REPLACEMEVER}
 versionCode=${REPLACEMEVERCODE}
-author=JingMatrix
+author=秋山羽桜
 description=Software simulation for Android hardware-backed key pairs with key attestation
-updateJson=https://raw.githubusercontent.com/JingMatrix/TEESimulator/main/module/update.json
+updateJson=https://raw.githubusercontent.com/AkiHaza/Niseko/main/module/update.json

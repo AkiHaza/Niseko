@@ -1,16 +1,56 @@
 package org.matrix.TEESimulator.interception.keystore
 
+import android.hardware.security.keymint.KeyParameter
+import android.hardware.security.keymint.KeyParameterValue
+import android.hardware.security.keymint.Tag
 import android.os.Parcel
 import android.os.Parcelable
 import android.security.KeyStore
 import android.security.keystore.KeystoreResponse
+import android.system.keystore2.Authorization
 import org.matrix.TEESimulator.interception.core.BinderInterceptor
 import org.matrix.TEESimulator.logging.SystemLogger
+import org.matrix.TEESimulator.util.AndroidDeviceUtils
 
 data class KeyIdentifier(val uid: Int, val alias: String)
 
 /** A collection of utility functions to support binder interception. */
 object InterceptorUtils {
+
+    private const val EX_SERVICE_SPECIFIC = -8
+
+    /**
+     * Maps known ResponseCode/KeyMint error codes to their canonical AOSP keystore2
+     * anyhow-formatted strings (e.g. "Error::Rc(KEY_NOT_FOUND)", "Error::Km(INVALID_TAG)").
+     * Without this, SSE replies carry 0xFFFFFFFF as the message word, diverging from
+     * real keystore2's wire shape — a detection vector for tools that inspect SSE payloads.
+     */
+    private fun synthesizeSseMessage(errorCode: Int): String =
+        when (errorCode) {
+            2 -> "Error::Rc(SYSTEM_ERROR)"
+            4 -> "Error::Rc(PERMISSION_DENIED)"
+            6 -> "Error::Rc(VALUE_CORRUPTED)"
+            7 -> "Error::Rc(KEY_NOT_FOUND)"
+            10 -> "Error::Rc(BACKEND_BUSY)"
+            -3 -> "Error::Km(UNSUPPORTED_KEY_SIZE)"
+            -6 -> "Error::Km(INCOMPATIBLE_PURPOSE)"
+            -7 -> "Error::Km(INCOMPATIBLE_ALGORITHM)"
+            -29 -> "Error::Km(TOO_MANY_OPERATIONS)"
+            -49 -> "Error::Km(UNSUPPORTED_TAG)"
+            -75 -> "Error::Km(INVALID_INPUT_LENGTH)"
+            -76 -> "Error::Km(INVALID_TAG)"
+            else -> if (errorCode > 0) "Error::Rc($errorCode)" else "Error::Km($errorCode)"
+        }
+
+    fun createErrorReply(errorCode: Int): BinderInterceptor.TransactionResult.OverrideReply {
+        val parcel = Parcel.obtain().apply {
+            writeInt(EX_SERVICE_SPECIFIC)
+            writeString(synthesizeSseMessage(errorCode))
+            writeInt(0) // empty remote stack trace header (AOSP Status.cpp:196)
+            writeInt(errorCode)
+        }
+        return BinderInterceptor.TransactionResult.OverrideReply(parcel)
+    }
 
     /**
      * Uses reflection to get the integer transaction code for a given method name from a Stub
@@ -82,12 +122,21 @@ object InterceptorUtils {
     fun <T : Parcelable?> createTypedObjectReply(
         obj: T,
         flags: Int = 0,
+        diagnosticTag: String? = null,
     ): BinderInterceptor.TransactionResult.OverrideReply {
         val parcel =
             Parcel.obtain().apply {
                 writeNoException()
                 writeTypedObject(obj, flags)
             }
+        if (diagnosticTag != null && SystemLogger.isDebugBuild) {
+            val savedPos = parcel.dataPosition()
+            val wire = parcel.marshall()
+            parcel.setDataPosition(savedPos)
+            val path = "/data/local/tmp/teesim-$diagnosticTag.bin"
+            runCatching { java.io.File(path).writeBytes(wire) }
+            SystemLogger.debug("[$diagnosticTag] reply len=${wire.size} path=$path")
+        }
         return BinderInterceptor.TransactionResult.OverrideReply(parcel)
     }
 
@@ -111,5 +160,73 @@ object InterceptorUtils {
         val exception = runCatching { reply.readException() }.exceptionOrNull()
         if (exception != null) reply.setDataPosition(0)
         return exception != null
+    }
+
+    fun createServiceSpecificErrorReply(
+        errorCode: Int
+    ): BinderInterceptor.TransactionResult.OverrideReply = createErrorReply(errorCode)
+
+    /**
+     * Normalizes a ServiceSpecificException reply so the wire shape matches AOSP keystore2's
+     * anyhow-formatted strings. Real keystore2 SSE replies that pass through SkipTransaction
+     * retain the daemon's internal chain; this synthesizer ensures consistency regardless
+     * of whether the SSE originated from our code or the real keystore2.
+     */
+    fun normalizeServiceSpecificReply(reply: Parcel): Parcel? {
+        reply.setDataPosition(0)
+        if (reply.readInt() != EX_SERVICE_SPECIFIC) {
+            reply.setDataPosition(0)
+            return null
+        }
+        // Advance position past message and stack header to reach errorCode.
+        reply.readString()
+        reply.readInt()
+        val errorCode = reply.readInt()
+        reply.setDataPosition(0)
+        return Parcel.obtain().apply {
+            writeInt(EX_SERVICE_SPECIFIC)
+            writeString(synthesizeSseMessage(errorCode))
+            writeInt(0)
+            writeInt(errorCode)
+        }
+    }
+
+    fun patchAuthorizations(
+        authorizations: Array<Authorization>?,
+        callingUid: Int,
+    ): Array<Authorization>? {
+        if (authorizations == null) return null
+
+        val osPatch = AndroidDeviceUtils.getPatchLevel(callingUid)
+        val vendorPatch = AndroidDeviceUtils.getVendorPatchLevelLong(callingUid)
+        val bootPatch = AndroidDeviceUtils.getBootPatchLevelLong(callingUid)
+
+        return authorizations
+            .map { auth ->
+                val replacement =
+                    when (auth.keyParameter.tag) {
+                        Tag.OS_PATCHLEVEL ->
+                            if (osPatch != AndroidDeviceUtils.DO_NOT_REPORT) osPatch else null
+                        Tag.VENDOR_PATCHLEVEL ->
+                            if (vendorPatch != AndroidDeviceUtils.DO_NOT_REPORT) vendorPatch
+                            else null
+                        Tag.BOOT_PATCHLEVEL ->
+                            if (bootPatch != AndroidDeviceUtils.DO_NOT_REPORT) bootPatch else null
+                        else -> null
+                    }
+                if (replacement != null) {
+                    Authorization().apply {
+                        keyParameter =
+                            KeyParameter().apply {
+                                tag = auth.keyParameter.tag
+                                value = KeyParameterValue.integer(replacement)
+                            }
+                        securityLevel = auth.securityLevel
+                    }
+                } else {
+                    auth
+                }
+            }
+            .toTypedArray()
     }
 }
