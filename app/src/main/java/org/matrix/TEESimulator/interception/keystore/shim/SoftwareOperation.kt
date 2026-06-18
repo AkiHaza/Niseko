@@ -3,10 +3,15 @@ package org.matrix.TEESimulator.interception.keystore.shim
 import android.hardware.security.keymint.Algorithm
 import android.hardware.security.keymint.BlockMode
 import android.hardware.security.keymint.Digest
+import android.hardware.security.keymint.KeyParameter
+import android.hardware.security.keymint.KeyParameterValue
 import android.hardware.security.keymint.KeyPurpose
 import android.hardware.security.keymint.PaddingMode
-import android.os.RemoteException
+import android.hardware.security.keymint.Tag
+import android.os.ServiceSpecificException
+import java.util.concurrent.locks.LockSupport
 import android.system.keystore2.IKeystoreOperation
+import android.system.keystore2.KeyParameters
 import java.security.KeyPair
 import java.security.Signature
 import java.security.SignatureException
@@ -15,16 +20,16 @@ import org.matrix.TEESimulator.attestation.KeyMintAttestation
 import org.matrix.TEESimulator.logging.KeyMintParameterLogger
 import org.matrix.TEESimulator.logging.SystemLogger
 
-// A sealed interface to represent the different cryptographic operations we can perform.
 private sealed interface CryptoPrimitive {
+    fun updateAad(aadInput: ByteArray?) {
+        throw ServiceSpecificException(KeystoreErrorCodes.invalidTag)
+    }
     fun update(data: ByteArray?): ByteArray?
-
     fun finish(data: ByteArray?, signature: ByteArray?): ByteArray?
-
     fun abort()
+    fun getBeginParameters(): Array<KeyParameter>? = null
 }
 
-// Helper object to map KeyMint constants to JCA algorithm strings.
 private object JcaAlgorithmMapper {
     fun mapSignatureAlgorithm(params: KeyMintAttestation): String {
         val digest =
@@ -34,16 +39,18 @@ private object JcaAlgorithmMapper {
                 Digest.SHA_2_512 -> "SHA512"
                 else -> "NONE"
             }
-        val keyAlgo =
-            when (params.algorithm) {
-                Algorithm.EC -> "ECDSA"
-                Algorithm.RSA -> "RSA"
-                else ->
-                    throw IllegalArgumentException(
-                        "Unsupported signature algorithm: ${params.algorithm}"
-                    )
+        return when (params.algorithm) {
+            Algorithm.EC -> "${digest}withECDSA"
+            Algorithm.RSA -> {
+                val isPss = params.padding.firstOrNull() == PaddingMode.RSA_PSS
+                if (isPss) "${digest}withRSA/PSS" else "${digest}withRSA"
             }
-        return "${digest}with${keyAlgo}"
+            else ->
+                throw ServiceSpecificException(
+                    KeystoreErrorCodes.incompatibleAlgorithm,
+                    "Unsupported signature algorithm: ${params.algorithm}",
+                )
+        }
     }
 
     fun mapCipherAlgorithm(params: KeyMintAttestation): String {
@@ -52,30 +59,32 @@ private object JcaAlgorithmMapper {
                 Algorithm.RSA -> "RSA"
                 Algorithm.AES -> "AES"
                 else ->
-                    throw IllegalArgumentException(
-                        "Unsupported cipher algorithm: ${params.algorithm}"
+                    throw ServiceSpecificException(
+                        KeystoreErrorCodes.incompatibleAlgorithm,
+                        "Unsupported cipher algorithm: ${params.algorithm}",
                     )
             }
         val blockMode =
             when (params.blockMode.firstOrNull()) {
                 BlockMode.ECB -> "ECB"
                 BlockMode.CBC -> "CBC"
+                BlockMode.CTR -> "CTR"
                 BlockMode.GCM -> "GCM"
-                else -> "ECB" // Default for RSA
+                else -> "ECB"
             }
         val padding =
             when (params.padding.firstOrNull()) {
                 PaddingMode.NONE -> "NoPadding"
                 PaddingMode.PKCS7 -> "PKCS7Padding"
                 PaddingMode.RSA_PKCS1_1_5_ENCRYPT -> "PKCS1Padding"
+                PaddingMode.RSA_PKCS1_1_5_SIGN -> "PKCS1Padding"
                 PaddingMode.RSA_OAEP -> "OAEPPadding"
-                else -> "NoPadding" // Default for GCM
+                else -> "NoPadding"
             }
         return "$keyAlgo/$blockMode/$padding"
     }
 }
 
-// Concrete implementation for Signing.
 private class Signer(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPrimitive {
     private val signature: Signature =
         Signature.getInstance(JcaAlgorithmMapper.mapSignatureAlgorithm(params)).apply {
@@ -95,7 +104,6 @@ private class Signer(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPrimi
     override fun abort() {}
 }
 
-// Concrete implementation for Verification.
 private class Verifier(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPrimitive {
     private val signature: Signature =
         Signature.getInstance(JcaAlgorithmMapper.mapSignatureAlgorithm(params)).apply {
@@ -109,29 +117,40 @@ private class Verifier(keyPair: KeyPair, params: KeyMintAttestation) : CryptoPri
 
     override fun finish(data: ByteArray?, signature: ByteArray?): ByteArray? {
         if (data != null) update(data)
-        if (signature == null) throw SignatureException("Signature to verify is null")
-        if (!this.signature.verify(signature)) {
-            // Throwing an exception is how Keystore signals verification failure.
-            throw SignatureException("Signature verification failed")
+        if (signature == null) {
+            throw ServiceSpecificException(KeystoreErrorCodes.verificationFailed, "Signature to verify is null")
         }
-        // A successful verification returns no data.
+        if (!this.signature.verify(signature)) {
+            throw ServiceSpecificException(KeystoreErrorCodes.verificationFailed, "Signature verification failed")
+        }
         return null
     }
 
     override fun abort() {}
 }
 
-// Concrete implementation for Encryption/Decryption.
 private class CipherPrimitive(
-    keyPair: KeyPair,
+    cryptoKey: java.security.Key,
     params: KeyMintAttestation,
     private val opMode: Int,
 ) : CryptoPrimitive {
+    private val isAead = params.blockMode.firstOrNull() == BlockMode.GCM
     private val cipher: Cipher =
         Cipher.getInstance(JcaAlgorithmMapper.mapCipherAlgorithm(params)).apply {
-            val key = if (opMode == Cipher.ENCRYPT_MODE) keyPair.public else keyPair.private
-            init(opMode, key)
+            val nonce = params.nonce
+            if (nonce != null && isAead) {
+                init(opMode, cryptoKey, javax.crypto.spec.GCMParameterSpec(128, nonce))
+            } else if (nonce != null) {
+                init(opMode, cryptoKey, javax.crypto.spec.IvParameterSpec(nonce))
+            } else {
+                init(opMode, cryptoKey)
+            }
         }
+
+    override fun updateAad(aadInput: ByteArray?) {
+        if (!isAead) throw ServiceSpecificException(KeystoreErrorCodes.invalidTag)
+        if (aadInput != null) cipher.updateAAD(aadInput)
+    }
 
     override fun update(data: ByteArray?): ByteArray? =
         if (data != null) cipher.update(data) else null
@@ -139,78 +158,212 @@ private class CipherPrimitive(
     override fun finish(data: ByteArray?, signature: ByteArray?): ByteArray? =
         if (data != null) cipher.doFinal(data) else cipher.doFinal()
 
+    override fun getBeginParameters(): Array<KeyParameter>? {
+        val iv = cipher.iv ?: return null
+        return arrayOf(
+            KeyParameter().apply {
+                tag = Tag.NONCE
+                value = KeyParameterValue.blob(iv)
+            }
+        )
+    }
+
     override fun abort() {}
 }
 
-/**
- * A software-only implementation of a cryptographic operation. This class acts as a controller,
- * delegating to a specific cryptographic primitive based on the operation's purpose.
- */
-class SoftwareOperation(private val txId: Long, keyPair: KeyPair, params: KeyMintAttestation) {
-    // This now holds the specific strategy object (Signer, Verifier, etc.)
+private class KeyAgreementPrimitive(keyPair: KeyPair) : CryptoPrimitive {
+    private val agreement: javax.crypto.KeyAgreement =
+        javax.crypto.KeyAgreement.getInstance("ECDH").apply { init(keyPair.private) }
+
+    override fun update(data: ByteArray?): ByteArray? = null
+
+    override fun finish(data: ByteArray?, signature: ByteArray?): ByteArray? {
+        if (data == null)
+            throw ServiceSpecificException(
+                KeystoreErrorCodes.invalidArgument,
+                "Peer public key required for key agreement",
+            )
+        val peerKey =
+            java.security.KeyFactory.getInstance("EC")
+                .generatePublic(java.security.spec.X509EncodedKeySpec(data))
+        agreement.doPhase(peerKey, true)
+        return agreement.generateSecret()
+    }
+
+    override fun abort() {}
+}
+
+class SoftwareOperation(
+    private val txId: Long,
+    keyPair: KeyPair?,
+    secretKey: javax.crypto.SecretKey?,
+    params: KeyMintAttestation,
+    private val latencyFloorMs: Long = 0L,
+) {
     private val primitive: CryptoPrimitive
+    @Volatile var finalized = false
+        private set
+
+    var onFinishCallback: (() -> Unit)? = null
+
+    val beginParameters: KeyParameters?
+        get() {
+            val params = primitive.getBeginParameters() ?: return null
+            if (params.isEmpty()) return null
+            return KeyParameters().apply { keyParameter = params }
+        }
 
     init {
-        // The "Strategy" pattern: choose the implementation based on the purpose.
-        // For simplicity, we only consider the first purpose listed.
         val purpose = params.purpose.firstOrNull()
         val purposeName = KeyMintParameterLogger.purposeNames[purpose] ?: "UNKNOWN"
         SystemLogger.debug("[SoftwareOp TX_ID: $txId] Initializing for purpose: $purposeName.")
 
+        if (purpose == null) {
+            SystemLogger.warning(
+                "[SoftwareOp TX_ID: $txId] Purpose missing on restored key " +
+                "(authorizations=${params.purpose}, keyPair=${if (keyPair != null) "present" else "null"}, " +
+                "secretKey=${if (secretKey != null) "present" else "null"}). " +
+                "Returning unsupportedPurpose."
+            )
+            throw ServiceSpecificException(
+                KeystoreErrorCodes.unsupportedPurpose,
+                "Restored key has no PURPOSE authorization",
+            )
+        }
+
         primitive =
             when (purpose) {
-                KeyPurpose.SIGN -> Signer(keyPair, params)
-                KeyPurpose.VERIFY -> Verifier(keyPair, params)
-                KeyPurpose.ENCRYPT -> CipherPrimitive(keyPair, params, Cipher.ENCRYPT_MODE)
-                KeyPurpose.DECRYPT -> CipherPrimitive(keyPair, params, Cipher.DECRYPT_MODE)
+                KeyPurpose.SIGN -> {
+                    val kp = keyPair ?: throw ServiceSpecificException(
+                        KeystoreErrorCodes.invalidArgument,
+                        "[SoftwareOp TX_ID: $txId] SIGN requested but keyPair is null",
+                    )
+                    Signer(kp, params)
+                }
+                KeyPurpose.VERIFY -> {
+                    val kp = keyPair ?: throw ServiceSpecificException(
+                        KeystoreErrorCodes.invalidArgument,
+                        "[SoftwareOp TX_ID: $txId] VERIFY requested but keyPair is null",
+                    )
+                    Verifier(kp, params)
+                }
+                KeyPurpose.ENCRYPT -> {
+                    val key: java.security.Key = secretKey ?: keyPair?.public
+                        ?: throw ServiceSpecificException(
+                            KeystoreErrorCodes.unsupportedPurpose,
+                            "[SoftwareOp TX_ID: $txId] ENCRYPT requires either secretKey or keyPair.public",
+                        )
+                    CipherPrimitive(key, params, Cipher.ENCRYPT_MODE)
+                }
+                KeyPurpose.DECRYPT -> {
+                    val key: java.security.Key = secretKey ?: keyPair?.private
+                        ?: throw ServiceSpecificException(
+                            KeystoreErrorCodes.unsupportedPurpose,
+                            "[SoftwareOp TX_ID: $txId] DECRYPT requires either secretKey or keyPair.private",
+                        )
+                    CipherPrimitive(key, params, Cipher.DECRYPT_MODE)
+                }
+                KeyPurpose.AGREE_KEY -> {
+                    val kp = keyPair ?: throw ServiceSpecificException(
+                        KeystoreErrorCodes.invalidArgument,
+                        "[SoftwareOp TX_ID: $txId] AGREE_KEY requested but keyPair is null",
+                    )
+                    KeyAgreementPrimitive(kp)
+                }
                 else ->
-                    throw UnsupportedOperationException("Unsupported operation purpose: $purpose")
+                    throw ServiceSpecificException(
+                        KeystoreErrorCodes.unsupportedPurpose,
+                        "Unsupported operation purpose: $purpose",
+                    )
             }
     }
 
-    fun update(data: ByteArray?): ByteArray? {
-        try {
-            return primitive.update(data)
-        } catch (e: Exception) {
-            SystemLogger.error("[SoftwareOp TX_ID: $txId] Failed to update operation.", e)
-            throw e
+    private fun checkActive() {
+        if (finalized) {
+            throw ServiceSpecificException(KeystoreErrorCodes.invalidOperationHandle)
         }
+    }
+
+    private fun checkInputLength(data: ByteArray?) {
+        if (data != null && data.size > MAX_RECEIVE_DATA) {
+            throw ServiceSpecificException(KeystoreErrorCodes.tooMuchData)
+        }
+    }
+
+    fun updateAad(aadInput: ByteArray?) {
+        checkActive()
+        checkInputLength(aadInput)
+        primitive.updateAad(aadInput)
+    }
+
+    fun update(data: ByteArray?): ByteArray? {
+        checkActive()
+        checkInputLength(data)
+        return primitive.update(data)
     }
 
     fun finish(data: ByteArray?, signature: ByteArray?): ByteArray? {
-        try {
-            val result = primitive.finish(data, signature)
-            SystemLogger.info("[SoftwareOp TX_ID: $txId] Finished operation successfully.")
-            return result
-        } catch (e: Exception) {
-            SystemLogger.error("[SoftwareOp TX_ID: $txId] Failed to finish operation.", e)
-            // Re-throw the exception so the binder can report it to the client.
-            throw e
+        checkActive()
+        checkInputLength(data)
+        val startNs = if (latencyFloorMs > 0) System.nanoTime() else 0L
+        val result = primitive.finish(data, signature)
+        if (latencyFloorMs > 0) {
+            val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
+            val delayMs = latencyFloorMs - elapsedMs
+            if (delayMs > 0) LockSupport.parkNanos(delayMs * 1_000_000)
         }
+        finalized = true
+        onFinishCallback?.invoke()
+        SystemLogger.info("[SoftwareOp TX_ID: $txId] Finished operation successfully.")
+        return result
     }
 
     fun abort() {
+        finalized = true
         primitive.abort()
-        SystemLogger.debug("[SoftwareOp TX_ID: $txId] Operation aborted.")
+    }
+
+    private fun mapToServiceSpecificException(e: Exception): ServiceSpecificException = when (e) {
+        is SignatureException -> ServiceSpecificException(KeystoreErrorCodes.verificationFailed, e.message)
+        is javax.crypto.BadPaddingException -> ServiceSpecificException(KeystoreErrorCodes.invalidArgument, e.message)
+        is javax.crypto.IllegalBlockSizeException -> ServiceSpecificException(KeystoreErrorCodes.invalidInputLength, e.message)
+        is java.security.InvalidKeyException -> ServiceSpecificException(KeystoreErrorCodes.incompatibleKey, e.message)
+        else -> ServiceSpecificException(KeystoreErrorCodes.unknownError, e.message)
+    }
+
+    companion object {
+        private const val MAX_RECEIVE_DATA = 0x8000
     }
 }
 
-/** The Binder interface for our [SoftwareOperation]. */
-class SoftwareOperationBinder(private val operation: SoftwareOperation) :
-    IKeystoreOperation.Stub() {
+internal object KeystoreErrorCodes {
+    val tooMuchData: Int by lazy { resolveField("android.system.keystore2.ResponseCode", "TOO_MUCH_DATA", 21) }
+    val invalidOperationHandle: Int by lazy { resolveField("android.hardware.security.keymint.ErrorCode", "INVALID_OPERATION_HANDLE", -28) }
+    val invalidTag: Int by lazy { resolveField("android.hardware.security.keymint.ErrorCode", "INVALID_TAG", -76) }
+    val verificationFailed: Int by lazy { resolveField("android.hardware.security.keymint.ErrorCode", "VERIFICATION_FAILED", -30) }
+    val invalidArgument: Int by lazy { resolveField("android.hardware.security.keymint.ErrorCode", "INVALID_ARGUMENT", -38) }
+    val invalidInputLength: Int by lazy { resolveField("android.hardware.security.keymint.ErrorCode", "INVALID_INPUT_LENGTH", -21) }
+    val incompatibleKey: Int by lazy { resolveField("android.hardware.security.keymint.ErrorCode", "INCOMPATIBLE_KEY", -31) }
+    val incompatiblePurpose: Int by lazy { resolveField("android.hardware.security.keymint.ErrorCode", "INCOMPATIBLE_PURPOSE", -13) }
+    val unsupportedPurpose: Int by lazy { resolveField("android.hardware.security.keymint.ErrorCode", "UNSUPPORTED_PURPOSE", -14) }
+    val incompatibleAlgorithm: Int by lazy { resolveField("android.hardware.security.keymint.ErrorCode", "INCOMPATIBLE_ALGORITHM", -18) }
+    val keyNotYetValid: Int by lazy { resolveField("android.hardware.security.keymint.ErrorCode", "KEY_NOT_YET_VALID", -39) }
+    val keyExpired: Int by lazy { resolveField("android.hardware.security.keymint.ErrorCode", "KEY_EXPIRED", -40) }
+    val callerNonceProhibited: Int by lazy { resolveField("android.hardware.security.keymint.ErrorCode", "CALLER_NONCE_PROHIBITED", -55) }
+    val unknownError: Int by lazy { resolveField("android.hardware.security.keymint.ErrorCode", "UNKNOWN_ERROR", -1000) }
 
-    @Throws(RemoteException::class)
-    override fun update(input: ByteArray?): ByteArray? {
-        return operation.update(input)
-    }
+    fun resolveField(className: String, fieldName: String, fallback: Int): Int =
+        runCatching { Class.forName(className).getField(fieldName).getInt(null) }
+            .getOrElse { fallback }
+}
 
-    @Throws(RemoteException::class)
-    override fun finish(input: ByteArray?, signature: ByteArray?): ByteArray? {
-        return operation.finish(input, signature)
-    }
-
-    @Throws(RemoteException::class)
-    override fun abort() {
-        operation.abort()
-    }
+class SoftwareOperationBinder(private val operation: SoftwareOperation) : IKeystoreOperation.Stub() {
+    @Synchronized
+    override fun updateAad(aadInput: ByteArray?) { operation.updateAad(aadInput) }
+    @Synchronized
+    override fun update(input: ByteArray?): ByteArray? { return operation.update(input) }
+    @Synchronized
+    override fun finish(input: ByteArray?, signature: ByteArray?): ByteArray? { return operation.finish(input, signature) }
+    @Synchronized
+    override fun abort() { operation.abort() }
 }

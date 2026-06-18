@@ -2,17 +2,11 @@ name: Build
 
 on:
   push:
-    branches: [ "main" ]
-    paths-ignore:
-      - '**.md'
-      - '.github/**'
-      - '!.github/workflows/**'
+    branches: ["dev"]
+    paths-ignore: ['**.md']
   pull_request:
-    branches: [ "main" ]
-    paths-ignore:
-      - '**.md'
-      - '.github/**'
-      - '!.github/workflows/**'
+    branches: ["dev", "main"]
+    paths-ignore: ['**.md']
   workflow_dispatch:
 
 concurrency:
@@ -120,13 +114,63 @@ jobs:
           retention-days: 30
           compression-level: 9
 
-      - name: Summary
-        if: always()
+  release:
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version
+        id: ver
         run: |
-          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Gradle Tasks**: assembleRelease, assembleDebug" >> $GITHUB_STEP_SUMMARY
-          if [[ "${{ job.status }}" == "success" ]]; then
-            echo "- **Release Artifact**: ${{ steps.prepareArtifact.outputs.releaseName }}" >> $GITHUB_STEP_SUMMARY
-            echo "- **Debug Artifact**: ${{ steps.prepareArtifact.outputs.debugName }}" >> $GITHUB_STEP_SUMMARY
-          fi
+          ver=$(grep 'val verName' app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')
+          count=$(git rev-list HEAD --count)
+          echo "version=${ver}-${count}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: niseko-release-zip
+          path: zips
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: niseko-debug-zip
+        path: zips
+
+      - name: Create release
+        run: |
+          gh release delete "$VER" --yes 2>/dev/null || true
+          RELEASE=$(ls zips/*Release*.zip | head -1)
+          DEBUG=$(ls zips/*Debug*.zip | head -1)
+          gh release create "$VER" \
+            --title "$VER" \
+            --latest \
+            --notes "Niseko $VER" \
+            "$RELEASE" \
+            "$DEBUG"
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump update.json
+        run: |
+          COUNT=$(git rev-list HEAD --count)
+          RELEASE_NAME=$(basename zips/*Release*.zip)
+          ZIP_URL="https://github.com/${{ github.repository }}/releases/download/${VER}/${RELEASE_NAME}"
+          jq ".version = \"$VER\" | .versionCode = $COUNT | .zipUrl = \"$ZIP_URL\" | .changelog = \"https://raw.githubusercontent.com/${{ github.repository }}/main/module/changelog.md\"" module/update.json > /tmp/update.json
+          mv /tmp/update.json module/update.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add module/update.json
+          git diff --cached --quiet || {
+            git commit -m "chore(release): bump update.json to $VER [skip ci]"
+            git push origin HEAD:main
+          }
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

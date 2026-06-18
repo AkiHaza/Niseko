@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.os.Build
 import android.os.Looper
+import java.io.File
 import java.security.Security
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.matrix.TEESimulator.config.ConfigurationManager
@@ -20,28 +21,27 @@ import org.matrix.TEESimulator.util.AndroidDeviceUtils
  * including initialization of interceptors and maintaining the service's primary execution loop.
  */
 object App {
-    // The delay in milliseconds before retrying to initialize the interceptor.
     private const val RETRY_DELAY_MS = 1000L
-    // The sleep duration in milliseconds for the main service loop to keep the process alive.
-    private const val SERVICE_SLEEP_MS = 1000000L
 
-    /**
-     * The main entry point of the TEESimulator application.
-     *
-     * @param args Command line arguments (not used).
-     */
     @JvmStatic
     fun main(args: Array<String>) {
         SystemLogger.info("Welcome to TEESimulator!")
 
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            SystemLogger.error("Uncaught exception on ${thread.name}", throwable)
+        }
+
         try {
-            // Initialize the Android framework environment
+            purgeDebugDiagnostics()
             prepareEnvironment()
+
+            // Load the package configuration before interceptors so the hook
+            // sees the correct config snapshot at initialization time.
+            ConfigurationManager.initialize()
+
             // Initialize and start the appropriate keystore interceptors.
             initializeInterceptors()
 
-            // Load the package configuration.
-            ConfigurationManager.initialize()
             // Set up the device's boot key and hash, which are crucial for attestation.
             AndroidDeviceUtils.setupBootKeyAndHash()
 
@@ -60,42 +60,47 @@ object App {
         }
     }
 
+    /**
+     * Release builds never emit diagnostics. Sweep any `.bin` dumps a prior
+     * debug install left in the world-readable temp dir so they can't act as a
+     * detection artifact for apps that probe /data/local/tmp.
+     */
+    private fun purgeDebugDiagnostics() {
+        if (SystemLogger.isDebugBuild) return
+        val stale =
+            File("/data/local/tmp").listFiles { _, name ->
+                name.startsWith("teesim-") && name.endsWith(".bin")
+            } ?: return
+        stale.forEach { runCatching { it.delete() } }
+        if (stale.isNotEmpty()) {
+            SystemLogger.warning("Purged ${stale.size} stale debug diagnostic(s) from /data/local/tmp")
+        }
+    }
+
     /** Initializes the necessary Android framework internals to satisfy KeyStore requirements. */
     private fun prepareEnvironment() {
-        // 1. Prepare Main Looper
         if (Looper.getMainLooper() == null) {
             @Suppress("deprecation") Looper.prepareMainLooper()
         }
 
-        // 2. Initialize ActivityThread for the current process
         val activityThread = ActivityThread.systemMain()
-
-        // 3. Get the system context
         val systemContext = activityThread.getSystemContext()
 
-        // 4. Create a dummy Application object and attach the context
         val app = Application()
         val attachMethod =
             ContextWrapper::class.java.getDeclaredMethod("attachBaseContext", Context::class.java)
         attachMethod.isAccessible = true
         attachMethod.invoke(app, systemContext)
 
-        // 5. Inject this application object into ActivityThread's mInitialApplication field.
-        // This is what KeyStore.getApplicationContext() looks for.
         val mInitialApplicationField =
             ActivityThread::class.java.getDeclaredField("mInitialApplication")
         mInitialApplicationField.isAccessible = true
         mInitialApplicationField.set(activityThread, app)
     }
 
-    /**
-     * Selects and initializes the correct keystore interceptor based on the Android SDK version. It
-     * retries initialization until it succeeds.
-     */
     private fun initializeInterceptors() {
         val interceptor = selectKeystoreInterceptor()
 
-        // Continuously try to run the interceptor until it's successfully initialized.
         while (!interceptor.tryRunKeystoreInterceptor()) {
             SystemLogger.debug("Retrying interceptor initialization...")
             Thread.sleep(RETRY_DELAY_MS)
@@ -104,14 +109,8 @@ object App {
         SystemLogger.info("Interceptors initialized successfully.")
     }
 
-    /**
-     * Determines which keystore interceptor to use based on the device's Android version.
-     *
-     * @return The appropriate keystore interceptor instance.
-     */
     private fun selectKeystoreInterceptor(): AbstractKeystoreInterceptor =
         when {
-            // For Android Q (10) and R (11), use the original KeystoreInterceptor.
             Build.VERSION.SDK_INT in Build.VERSION_CODES.Q..Build.VERSION_CODES.R -> {
                 SystemLogger.info(
                     "Using KeystoreInterceptor for Android Q/R (SDK ${Build.VERSION.SDK_INT})"
@@ -119,7 +118,6 @@ object App {
                 android.security.keystore.AndroidKeyStoreProvider.install()
                 KeystoreInterceptor
             }
-            // For Android S (12) and newer, use the Keystore2Interceptor.
             else -> {
                 SystemLogger.info(
                     "Using Keystore2Interceptor for Android S and later (SDK ${Build.VERSION.SDK_INT})"
