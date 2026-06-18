@@ -1,19 +1,28 @@
-## 🚀 Release: TEESimulator v3.2 (Hotfix)
+## Niseko — Downstream Improvements Port
 
-TEESimulator v3.2 is rolling out today as an hotfix. This release was pushed ahead of schedule because our recent GitHub build artifacts were expiring, and a severe Google Play Services (GMS) log flooding bug was significantly degrading device performance for many users. 📱⚡
+Niseko is a fork of [JingMatrix/TEESimulator](https://github.com/JingMatrix/TEESimulator) with downstream improvements ported from [Enginex0/TEESimulator-RS](https://github.com/Enginex0/TEESimulator-RS).
 
-⚠️ **Important Development Update:**
-*   **Detections:** Due to time constraints, we haven't patched *all* the new detections currently in the wild. However, this hotfix does successfully address a few critical detection points. 🛡️
-*   **LSPosed ➡️ Vector:** I (JingMatrix) am currently dedicating my efforts to refactoring LSPosed into **Vector**. Consequently, TEESimulator's development pace will temporarily slow down. Please stay tuned and monitor the commit history to follow along with our progress! 🛠️👀
+### Ported Improvements
 
-Here is the changelog for this release:
+- **Full-type key persistence** (symmetric + asymmetric with byte-identical metadata)
+- **Grant plane virtualization** (caller-binding + access-vector gating, SDK≥36)
+- **Anti-detection** (Duck Detector: auth ordering, SecurityLevel.KEYSTORE, SSE normalization)
+- **Device capability mirroring** (canAttestDeviceIds — forge health, mirror capability)
+- **TEE latency simulation** (log-normal model + StrongBox floors)
+- **AOSP-compliant authorize_create** enforcement
+- **Google Wallet compatibility** (INCLUDE_UNIQUE_ID stripping)
+- **Key lifecycle sync** (clearNamespace, migrateKeyNamespace via maintenance binder)
+- **Action button** with Vol+ confirmation and 22-language i18n
+- **Debug diagnostic purge** on boot for release builds
 
-🔧 **Stability & Performance**
-*   **🛑 GMS Log Flooding:** Mitigated massive log spam and battery drain (especially noticeable on WearOS or Nearby Share) by safely bypassing `list` hooks for GMS.
-*   **💥 Binder Leak Resolved:** Squashed a critical strong reference memory leak during binder transaction interception that caused random crashes.
+### Excluded (by design)
 
-🛡️ **Anti-Detection & Emulation**
-*   **🔑 Pre-Existing Key Override:** TEESimulator now detects and replaces hardware keys that apps managed to request *before* the module was installed, ensuring all future operations remain under control.
-*   **🧩 Accurate `module_hash`:** Completely aligned the APEX module hashing logic with the official Android `keystore2` implementation (including direct `/apex` filesystem scanning and exact ASN.1 DER sorting).
-*   **📜 Certificate `KeyUsage` Fix:** Dynamically sets X.509 `KeyUsage` bits based on the actual key purpose to properly adhere to Android HAL specifications *(the first contribution of @Enginex0!)*.
-*   **⚙️ Core Improvements:** Enhanced KeyMint logging (parsing `ORIGIN`, `OS_VERSION`, etc.) and fixed Parcel position resets for cleaner internal error handling.
+- System property spoofing (BootStateManager, vbmeta props)
+- PIF integration (PatchLevelManager, BulletinPoller)
+- Rust native certificate generation (NativeCertGen)
+
+### Credits
+
+- [JingMatrix](https://github.com/JingMatrix) — original TEESimulator
+- [Enginex0](https://github.com/Enginex0) — downstream improvements
+- [Andrea-lyz](https://github.com/Andrea-lyz) — key persistence, Duck Detector fixes

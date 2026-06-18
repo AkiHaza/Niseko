@@ -2,10 +2,10 @@ name: Build
 
 on:
   push:
-    branches: ["dev"]
+    branches: ["main"]
     paths-ignore: ['**.md']
   pull_request:
-    branches: ["dev", "main"]
+    branches: ["main", "dev"]
     paths-ignore: ['**.md']
   workflow_dispatch:
 
@@ -16,18 +16,9 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      attestations: write
-      contents: read
-    
-    outputs:
-      releaseName: ${{ steps.prepareArtifact.outputs.releaseName }}
-      debugName: ${{ steps.prepareArtifact.outputs.debugName }}
-    
+
     steps:
-      - name: Check out
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           submodules: "recursive"
           fetch-depth: 0
@@ -44,7 +35,6 @@ jobs:
         with:
           key: ccache-${{ runner.os }}-${{ github.ref_name }}
           restore-keys: |
-            ccache-${{ runner.os }}-${{ github.ref_name }}
             ccache-${{ runner.os }}-
             ccache-
 
@@ -54,69 +44,44 @@ jobs:
       - name: Build with Gradle
         run: |
           chmod +x ./gradlew
+          ./gradlew zipRelease zipDebug --no-daemon -Dorg.gradle.jvmargs=-Xmx2048m
 
-          ./gradlew zipRelease zipDebug -Porg.gradle.parallel=true -Porg.gradle.vfs.watch=true -Dorg.gradle.jvmargs=-Xmx2048m
-
-      - name: Prepare artifact
-        if: success()
-        id: prepareArtifact
+      - name: Read version
+        id: ver
         run: |
-          set -e
-          RELEASE_FILE=$(find out -name "*Release*.zip" | head -1)
-          DEBUG_FILE=$(find out -name "*Debug*.zip" | head -1)
-          
-          if [[ -z "$RELEASE_FILE" || -z "$DEBUG_FILE" ]]; then
-            echo "Error: Could not find release or debug files in out/"
-            echo "Contents of out/ directory:"
-            ls -la out/ || echo "out/ directory does not exist"
-            exit 1
-          fi
-          
-          # Extract names
-          RELEASE_NAME=$(basename "$RELEASE_FILE" .zip)
-          DEBUG_NAME=$(basename "$DEBUG_FILE" .zip)
-          
-          echo "releaseName=$RELEASE_NAME" >> $GITHUB_OUTPUT
-          echo "debugName=$DEBUG_NAME" >> $GITHUB_OUTPUT
+          ver=$(grep 'val verName' app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')
+          count=$(git rev-list HEAD --count)
+          echo "version=${ver}-${count}" >> "$GITHUB_OUTPUT"
 
-          mkdir -p module-release module-debug
-          unzip -q "$RELEASE_FILE" -d module-release
-          unzip -q "$DEBUG_FILE" -d module-debug
-          echo "  Release: $RELEASE_NAME"
-          echo "  Debug: $DEBUG_NAME"
+      - name: List build artifacts
+        run: |
+          echo "Release: $(ls out/*Release*.zip 2>/dev/null | head -1)"
+          echo "Debug: $(ls out/*Debug*.zip 2>/dev/null | head -1)"
 
-      - name: Upload release
-        if: success()
-        id: release
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.prepareArtifact.outputs.releaseName }}
-          path: "./module-release/*"
+          name: niseko-release-zip
+          path: out/*-Release.zip
           retention-days: 30
-          compression-level: 6
+          compression-level: 0
 
-      - name: Upload debug
-        if: success()
-        id: debug
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.prepareArtifact.outputs.debugName }}
-          path: "./module-debug/*"
+          name: niseko-debug-zip
+          path: out/*-Debug.zip
           retention-days: 7
-          compression-level: 6
+          compression-level: 0
 
-      - name: Upload release mappings
-        if: success()
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: release-mappings-${{ github.run_number }}
-          path: "./app/build/outputs/mapping/release"
+          name: release-mappings
+          path: app/build/outputs/mapping/release
           retention-days: 30
           compression-level: 9
 
   release:
     needs: build
-    if: github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -140,7 +105,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: niseko-debug-zip
-        path: zips
+          path: zips
 
       - name: Create release
         run: |
