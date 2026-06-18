@@ -48,7 +48,7 @@ install_file() {
 
 # --- Installation ---
 ui_print "- Extracting module files"
-for file in customize.sh module.prop service.sh sepolicy.rule daemon; do
+for file in customize.sh module.prop service.sh sepolicy.rule daemon action.sh action_i18n.sh; do
   install_file "$file" "$MODPATH"
 done
 
@@ -86,4 +86,15 @@ fi
 if [ ! -f "$CONFIG_DIR/target.txt" ]; then
   ui_print "- Adding default target scope"
   install_file "target.txt" "$CONFIG_DIR"
+fi
+
+if [ ! -f "$CONFIG_DIR/security_patch.txt" ]; then
+  ui_print "- Adding default security patch config (mirror device props)"
+  printf '%s\n' \
+    '# TEESimulator default: mirror live device props.' \
+    '# system=prop reads ro.build.version.security_patch at cert-gen time;' \
+    '# boot and vendor are auto-forced to prop too.' \
+    '# Override with explicit YYYY-MM-DD dates if you want active spoofing.' \
+    'system=prop' > "$CONFIG_DIR/security_patch.txt"
+  chmod 644 "$CONFIG_DIR/security_patch.txt"
 fi

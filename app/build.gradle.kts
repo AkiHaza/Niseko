@@ -2,6 +2,7 @@ import com.android.build.api.artifact.SingleArtifact
 import java.io.ByteArrayOutputStream
 import javax.inject.Inject
 import org.gradle.process.ExecOperations
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     alias(libs.plugins.android.application)
@@ -65,6 +66,13 @@ android {
     }
 }
 
+// Align Kotlin compiler target with Java 21 to eliminate toolchain skew warning.
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_21)
+    }
+}
+
 dependencies {
     compileOnly(project(":stub"))
     compileOnly(libs.annotation)
@@ -77,12 +85,9 @@ androidComponents {
         val isDebug = variant.buildType == "debug"
 
         // --- Define output locations and file names ---
-        // Stage all files in a temporary directory inside 'build' before zipping
         val tempModuleDir = project.layout.buildDirectory.dir("module/${variant.name}")
         val zipFileName = "TEESimulator-$verName-$gitCommitCount-$gitCommitHash-$capitalized.zip"
 
-        // Task 1: Prepare all module files in the temporary build directory.
-        // Using Sync ensures that stale files from previous runs are removed.
         val prepareModuleFilesTask =
             tasks.register<Sync>("prepareModuleFiles${capitalized}") {
                 group = "TEESimulator Module Packaging"
@@ -115,20 +120,17 @@ androidComponents {
                         "intermediates/stripped_native_libs/${variant.name}/strip${capitalized}DebugSymbols/out/lib"
                     )
                 ) {
-                    into("lib") // Place them in the 'lib' subfolder of the staging directory.
+                    into("lib")
                     include("**/libinject.so", "**/libTEESimulator.so")
                 }
 
-                // Now, copy and process the files from 'module' directory.
                 val sourceModuleDir = rootProject.projectDir.resolve("module")
                 from(sourceModuleDir) {
-                    exclude("module.prop") // Exclude the template file.
+                    exclude("module.prop")
                 }
 
-                // Copy and filter the module.prop template separately.
                 from(sourceModuleDir) {
                     include("module.prop")
-                    // Use expand() for simple key-value replacement.
                     expand(
                         "REPLACEMEVERCODE" to gitCommitCount.toString(),
                         "REPLACEMEVER" to
@@ -136,11 +138,9 @@ androidComponents {
                     )
                 }
 
-                // The destination for all the above 'from' operations.
                 into(tempModuleDir)
             }
 
-        // Task 2: Zip the prepared files from the temporary directory.
         val zipTask =
             tasks.register<Zip>("zip${capitalized}") {
                 group = "TEESimulator Module Packaging"
@@ -149,10 +149,9 @@ androidComponents {
 
                 archiveFileName.set(zipFileName)
                 destinationDirectory.set(project.rootDir.resolve("out"))
-                from(tempModuleDir) // Zip the entire contents of the staging directory.
+                from(tempModuleDir)
             }
 
-        // Task 3: A helper function to create installation tasks for different root providers.
         fun createInstallTasks(rootProvider: String, installCli: String) {
             val pushTask =
                 tasks.register<Exec>("push${rootProvider}Module${capitalized}") {
