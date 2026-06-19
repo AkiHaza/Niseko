@@ -133,7 +133,7 @@ class KeyMintSecurityLevelInterceptor(
                 ?: return TransactionResult.SkipTransaction
             val parsedParams = KeyMintAttestation(params)
             val forced = data.readBoolean()
-            if (forced) SystemLogger.verbose("[TX_ID: $txId] Current operation has a very high pruning power.")
+            if (forced) SystemLogger.verbose { "[TX_ID: $txId] Current operation has a very high pruning power." }
             val response: CreateOperationResponse = reply.readTypedObject(CreateOperationResponse.CREATOR)
                 ?: return TransactionResult.SkipTransaction
             response.iOperation?.let { operation ->
@@ -421,7 +421,6 @@ class KeyMintSecurityLevelInterceptor(
             }
             return InterceptorUtils.createTypedObjectReply(metadata, diagnosticTag = "gen-mode-sym")
         }
-        // Asymmetric: use BouncyCastle CertificateGenerator (no NativeCertGen)
         val keyData = CertificateGenerator.generateAttestedKeyPair(
             callingUid, keyDescriptor.alias, attestationKey?.alias, parsedParams, securityLevel,
         ) ?: throw Exception("Certificate generation failed.")
@@ -713,12 +712,16 @@ class KeyMintSecurityLevelInterceptor(
     }
 }
 
-private fun KeyMintAttestation.toAuthorizations(callingUid: Int, securityLevel: Int): Array<Authorization> {
+private fun KeyMintAttestation.toAuthorizations(callingUid: Int, secLevel: Int): Array<Authorization> {
     val authList = mutableListOf<Authorization>()
-    fun createAuth(tag: Int, value: KeyParameterValue): Authorization =
-        Authorization().apply { keyParameter = KeyParameter().apply { this.tag = tag; this.value = value }; this.securityLevel = securityLevel }
-    fun createKeystoreAuth(tag: Int, value: KeyParameterValue): Authorization =
-        Authorization().apply { keyParameter = KeyParameter().apply { this.tag = tag; this.value = value }; this.securityLevel = SecurityLevel.KEYSTORE }
+    fun createAuth(tag: Int, value: KeyParameterValue): Authorization = Authorization().apply {
+        keyParameter = KeyParameter().apply { this.tag = tag; this.value = value }
+        this.securityLevel = secLevel
+    }
+    fun createKeystoreAuth(tag: Int, value: KeyParameterValue): Authorization = Authorization().apply {
+        keyParameter = KeyParameter().apply { this.tag = tag; this.value = value }
+        this.securityLevel = SecurityLevel.KEYSTORE
+    }
 
     this.purpose.forEach { authList.add(createAuth(Tag.PURPOSE, KeyParameterValue.keyPurpose(it))) }
     authList.add(createAuth(Tag.ALGORITHM, KeyParameterValue.algorithm(this.algorithm)))
@@ -742,18 +745,15 @@ private fun KeyMintAttestation.toAuthorizations(callingUid: Int, securityLevel: 
     authList.add(createAuth(Tag.OS_VERSION, KeyParameterValue.integer(AndroidDeviceUtils.osVersion)))
     val osPatch = AndroidDeviceUtils.getPatchLevel(callingUid)
     if (osPatch != AndroidDeviceUtils.DO_NOT_REPORT) authList.add(createAuth(Tag.OS_PATCHLEVEL, KeyParameterValue.integer(osPatch)))
-    // Real keystore2 does NOT surface VENDOR_PATCHLEVEL or BOOT_PATCHLEVEL in generateKey
-    // KeyMetadata.authorizations — they exist only in the attestation extension.
     authList.add(createKeystoreAuth(Tag.CREATION_DATETIME, KeyParameterValue.dateTime(System.currentTimeMillis())))
     this.activeDateTime?.let { authList.add(createKeystoreAuth(Tag.ACTIVE_DATETIME, KeyParameterValue.dateTime(it.time))) }
     this.originationExpireDateTime?.let { authList.add(createKeystoreAuth(Tag.ORIGINATION_EXPIRE_DATETIME, KeyParameterValue.dateTime(it.time))) }
     this.usageExpireDateTime?.let { authList.add(createKeystoreAuth(Tag.USAGE_EXPIRE_DATETIME, KeyParameterValue.dateTime(it.time))) }
     this.usageCountLimit?.let { authList.add(createKeystoreAuth(Tag.USAGE_COUNT_LIMIT, KeyParameterValue.integer(it))) }
     if (this.unlockedDeviceRequired == true) authList.add(createKeystoreAuth(Tag.UNLOCKED_DEVICE_REQUIRED, KeyParameterValue.boolValue(true)))
-    // USER_ID tagged at SecurityLevel.SOFTWARE (0), mirroring real keystore2 split
     authList.add(Authorization().apply {
-        keyParameter = KeyParameter().apply { tag = Tag.USER_ID; value = KeyParameterValue.integer(callingUid / 100000) }
-        securityLevel = SecurityLevel.SOFTWARE
+        keyParameter = KeyParameter().apply { this.tag = Tag.USER_ID; this.value = KeyParameterValue.integer(callingUid / 100000) }
+        this.securityLevel = SecurityLevel.SOFTWARE
     })
     return authList.toTypedArray()
 }
