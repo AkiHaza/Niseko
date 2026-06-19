@@ -30,7 +30,7 @@ val gitExecutor = objects.newInstance(GitExecutor::class.java)
 
 val gitCommitCount = gitExecutor.execute("git rev-list HEAD --count", rootDir).toInt()
 val gitCommitHash = gitExecutor.execute("git rev-parse --verify --short HEAD", rootDir)
-val verName = "v3.2"
+val verName = "v1.0"
 
 android {
     namespace = "org.matrix.TEESimulator"
@@ -86,11 +86,11 @@ androidComponents {
 
         // --- Define output locations and file names ---
         val tempModuleDir = project.layout.buildDirectory.dir("module/${variant.name}")
-        val zipFileName = "TEESimulator-$verName-$gitCommitCount-$gitCommitHash-$capitalized.zip"
+        val zipFileName = "Niseko-$verName-$gitCommitCount-$gitCommitHash-$capitalized.zip"
 
         val prepareModuleFilesTask =
             tasks.register<Sync>("prepareModuleFiles${capitalized}") {
-                group = "TEESimulator Module Packaging"
+                group = "Niseko Module Packaging"
                 description = "Prepares all files for the ${variant.name} module zip."
 
                 if (isDebug) {
@@ -143,7 +143,7 @@ androidComponents {
 
         val zipTask =
             tasks.register<Zip>("zip${capitalized}") {
-                group = "TEESimulator Module Packaging"
+                group = "Niseko Module Packaging"
                 description = "Creates the flashable zip for the ${variant.name} module."
                 dependsOn(prepareModuleFilesTask)
 
@@ -155,7 +155,7 @@ androidComponents {
         fun createInstallTasks(rootProvider: String, installCli: String) {
             val pushTask =
                 tasks.register<Exec>("push${rootProvider}Module${capitalized}") {
-                    group = "TEESimulator Module Installation"
+                    group = "Niseko Module Installation"
                     description =
                         "Pushes the ${variant.name} module to the device for $rootProvider."
                     dependsOn(zipTask)
@@ -169,7 +169,7 @@ androidComponents {
 
             val installTask =
                 tasks.register<Exec>("install${rootProvider}${capitalized}") {
-                    group = "TEESimulator Module Installation"
+                    group = "Niseko Module Installation"
                     description = "Installs the ${variant.name} module via $rootProvider."
                     dependsOn(pushTask)
                     commandLine(
@@ -182,7 +182,7 @@ androidComponents {
                 }
 
             tasks.register<Exec>("install${rootProvider}AndReboot${capitalized}") {
-                group = "TEESimulator Module Installation"
+                group = "Niseko Module Installation"
                 description = "Installs the ${variant.name} module via $rootProvider and reboots."
                 dependsOn(installTask)
                 commandLine("adb", "reboot")
