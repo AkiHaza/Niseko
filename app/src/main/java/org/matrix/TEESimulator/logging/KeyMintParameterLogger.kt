@@ -65,7 +65,11 @@ object KeyMintParameterLogger {
         SystemLogger.debug("KeyParam: %-25s | Value: %s".format(tagName, formattedValue))
     }
 
-    private fun ByteArray.toReadableString(): String =
-        if (this.all { it in 32..126 }) "\"${String(this, StandardCharsets.UTF_8)}" (${this.size} bytes)"
-        else "${this.toHex()} (${this.size} bytes)"
+    private fun ByteArray.toReadableString(): String {
+        return if (this.all { it in 32..126 }) {
+            "\"" + String(this, StandardCharsets.UTF_8) + "\" (" + this.size + " bytes)"
+        } else {
+            this.toHex() + " (" + this.size + " bytes)"
+        }
+    }
 }
